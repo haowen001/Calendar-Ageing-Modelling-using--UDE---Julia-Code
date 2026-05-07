@@ -113,3 +113,22 @@ https://doi.org/10.1016/j.apenergy.2024.125221.
 ```
 
 
+
+## Python reproduction
+
+A Python reproduction of the Julia workflow is included in `python_reproduction.py`. It reproduces:
+- loading `RPT_analysis_data.mat` and `RPTx_analysis_data.mat`,
+- experiment step construction from RPT dates,
+- temperature/model parameter selection (`Physics`/`UDE`),
+- quick visualization of capacity and LAM measurements.
+
+### Run in Python
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-python.txt
+python python_reproduction.py
+```
+
+This writes `python_reproduction_preview.png` in the repository root.
