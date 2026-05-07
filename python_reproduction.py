@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 import numpy as np
 from scipy.io import loadmat
+import h5py
 import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parent
@@ -27,38 +28,58 @@ class Step:
     sample_time: float
 
 
-def _read_mat(path: Path) -> dict:
-    return loadmat(path, struct_as_record=False, squeeze_me=True)
+def _read_mat(path: Path):
+    try:
+        return "scipy", loadmat(path, struct_as_record=False, squeeze_me=True)
+    except NotImplementedError:
+        return "hdf5", h5py.File(path, "r")
 
 
-def _extract_group(data: dict, temp: int, soc: int):
+def _extract_group(source, data, temp: int, soc: int):
     temp_key = f"Temperature_{temp}"
     soc_key = f"SOC_{soc}"
+
+    if source == "scipy":
+        if temp_key not in data:
+            raise KeyError(f"Missing {temp_key} in MAT data")
+        temperature_group = data[temp_key]
+        if not hasattr(temperature_group, soc_key):
+            raise KeyError(f"Missing {soc_key} under {temp_key}")
+        return getattr(temperature_group, soc_key)
+
     if temp_key not in data:
         raise KeyError(f"Missing {temp_key} in MAT data")
     temperature_group = data[temp_key]
-    if not hasattr(temperature_group, soc_key):
+    if soc_key not in temperature_group:
         raise KeyError(f"Missing {soc_key} under {temp_key}")
-    return getattr(temperature_group, soc_key)
+    return temperature_group[soc_key]
+
+
+def _read_field(group, field: str, source: str):
+    if source == "scipy":
+        return np.asarray(getattr(group, field), dtype=float)
+    if field not in group:
+        raise KeyError(f"Missing field {field}")
+    return np.asarray(group[field][()], dtype=float).squeeze()
 
 
 def get_capacity_data(temp: int, soc: int):
-    data = _read_mat(ROOT / "RPT_analysis_data.mat")
-    group = _extract_group(data, temp, soc)
-    days = np.asarray(group.Days, dtype=float)
-    mean = np.asarray(group.Capacity_Mean, dtype=float)
-    std = np.asarray(group.Capacity_Std, dtype=float)
+    source, data = _read_mat(ROOT / "RPT_analysis_data.mat")
+    group = _extract_group(source, data, temp, soc)
+    days = _read_field(group, "Days", source)
+    mean = _read_field(group, "Capacity_Mean", source)
+    std = _read_field(group, "Capacity_Std", source)
     if temp == 45 and soc == 90:
         return days[:-4], mean[:-4], std[:-4]
     return days, mean, std
 
 
 def get_lam_data(temp: int, soc: int):
-    data = _read_mat(ROOT / "RPTx_analysis_data.mat")
-    group = _extract_group(data, temp, soc)
-    days = np.asarray(group.LAM_days, dtype=float)
-    mean = np.asarray(group.LAM_mean, dtype=float)
-    std = np.asarray(group.LAM_std, dtype=float)
+    source, data = _read_mat(ROOT / "RPTx_analysis_data.mat")
+    group = _extract_group(source, data, temp, soc)
+    days = _read_field(group, "LAM_days", source)
+    mean = _read_field(group, "LAM_mean", source)
+    std = _read_field(group, "LAM_std", source)
     if temp == 45 and soc == 90:
         return days[:-1], mean, std
     return days, mean, std
