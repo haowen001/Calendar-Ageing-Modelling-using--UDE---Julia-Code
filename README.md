@@ -69,6 +69,29 @@ To run the model, follow these steps:
    julia Main.jl
    ```
 
+## Python Reproduction
+
+A Python port of the model lives alongside the Julia sources:
+
+* `model_parameters.py` — port of `Model_parameters.jl`
+* `experiment.py` — port of `Experiment.jl` (uses `h5py` to read the v7.3 `.mat` files)
+* `main.py` — port of `Main.jl`, driven by `scipy.integrate.solve_ivp` (BDF)
+
+Install dependencies and run:
+
+```bash
+pip install -r requirements.txt
+python main.py                                    # SOC=85, T=45 C, UDE
+python main.py --soc 50 --temperature 25 --model Physics
+python main.py --max-rpts 5                       # quick smoke test
+```
+
+The Julia driver uses a singular mass-matrix DAE for the CV current-hold
+algebraic constraint. SciPy's `solve_ivp` does not support DAEs natively, so
+the Python port enforces that constraint with a stiff penalty ODE handled by
+the BDF integrator. End-to-end results match the experimental capacity / LAM
+trends; small differences vs. Julia are expected from the change of integrator.
+
 ## Output
 
 Plots showing capacity and anode LAM measurements and corresponding model predictions.
