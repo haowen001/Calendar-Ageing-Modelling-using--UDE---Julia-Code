@@ -315,6 +315,32 @@ _NN_SEI = _unpack_lux_chain(NN_SEI_parameters)
 _NN_eps = _unpack_lux_chain(NN_eps_parameters)
 
 
+def set_NN_SEI_parameters(parameters):
+    """Replace the SEI UDE network parameters used by ``NN_SEI_forward``."""
+    global NN_SEI_parameters, _NN_SEI
+    NN_SEI_parameters = np.asarray(parameters, dtype=np.float64).copy()
+    if NN_SEI_parameters.shape != (151,):
+        raise ValueError('NN_SEI_parameters must contain 151 values')
+    _NN_SEI = _unpack_lux_chain(NN_SEI_parameters)
+
+
+def set_NN_eps_parameters(parameters):
+    """Replace the LAM UDE network parameters used by ``NN_eps_forward``."""
+    global NN_eps_parameters, _NN_eps
+    NN_eps_parameters = np.asarray(parameters, dtype=np.float64).copy()
+    if NN_eps_parameters.shape != (151,):
+        raise ValueError('NN_eps_parameters must contain 151 values')
+    _NN_eps = _unpack_lux_chain(NN_eps_parameters)
+
+
+def set_NN_parameters(sei_parameters=None, eps_parameters=None):
+    """Replace one or both trained UDE parameter vectors."""
+    if sei_parameters is not None:
+        set_NN_SEI_parameters(sei_parameters)
+    if eps_parameters is not None:
+        set_NN_eps_parameters(eps_parameters)
+
+
 def NN_SEI_forward(x):
     W1, b1, W2, b2, W3, b3 = _NN_SEI
     h = np.tanh(W1 @ x + b1)

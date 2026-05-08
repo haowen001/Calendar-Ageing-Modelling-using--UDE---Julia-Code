@@ -86,6 +86,42 @@ python main.py --soc 50 --temperature 25 --model Physics
 python main.py --max-rpts 5                       # quick smoke test
 ```
 
+### Training / fine-tuning the UDE parameters
+
+The Python port includes a finite-difference trainer for the UDE degradation
+parameters.  By default it uses the paper's unweighted L2 loss for relative
+capacity plus LAM and refits the two temperature-dependent UDE scale factors
+(`kappa1`, `kappa2`):
+
+```bash
+python train_ude.py --soc 85 --temperature 45 --max-nfev 30 --plot results_trained.png
+python main.py --soc 85 --temperature 45 --ude-params trained_ude_T45_SOC85.npz
+```
+
+The previous uncertainty-weighted objective is still available if you want the
+optimizer to give more importance to points with smaller experimental standard
+deviations:
+
+```bash
+python train_ude.py --soc 85 --temperature 45 --loss std-weighted --optimizer least-squares
+```
+
+For a quicker trial while developing, fit only the first few RPT points:
+
+```bash
+python train_ude.py --soc 85 --temperature 45 --max-rpts 4 --max-nfev 15
+```
+
+If the kappa-only fit is not flexible enough, the `last-layer` mode also
+fine-tunes the final dense layer of both UDE neural networks:
+
+```bash
+python train_ude.py --soc 85 --temperature 45 --mode last-layer --max-nfev 80 --plot results_trained.png
+```
+
+Training is slower than a forward simulation because each optimizer evaluation
+runs the full calendar-ageing experiment through the stiff ODE solver.
+
 The Julia driver uses a singular mass-matrix DAE for the CV current-hold
 algebraic constraint. SciPy's `solve_ivp` does not support DAEs natively, so
 the Python port enforces that constraint with a stiff penalty ODE handled by

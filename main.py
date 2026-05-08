@@ -40,6 +40,17 @@ R = Para.R
 T_ref = Para.T_ref
 
 
+def load_ude_parameters(path):
+    """Load UDE kappas and optional NN vectors from a ``train_ude.py`` npz."""
+    data = np.load(path)
+    if 'NN_SEI_parameters' in data or 'NN_eps_parameters' in data:
+        Para.set_NN_parameters(
+            data['NN_SEI_parameters'] if 'NN_SEI_parameters' in data else None,
+            data['NN_eps_parameters'] if 'NN_eps_parameters' in data else None,
+        )
+    return data['ude_kappa'] if 'ude_kappa' in data else None
+
+
 # ---------------------------------------------------------------------------
 # Voltage / RHS helpers
 # ---------------------------------------------------------------------------
@@ -250,7 +261,8 @@ def make_event(term_kind, threshold, current_func, t_step_start):
 # ---------------------------------------------------------------------------
 # Main driver
 # ---------------------------------------------------------------------------
-def run(SOC=85, Temperature=45, Model='UDE', max_rpts=None, verbose=True):
+def run(SOC=85, Temperature=45, Model='UDE', max_rpts=None, verbose=True,
+        ude_kappa_override=None):
     if Model not in ('Physics', 'UDE'):
         raise ValueError("Model must be 'Physics' or 'UDE'")
 
@@ -281,6 +293,10 @@ def run(SOC=85, Temperature=45, Model='UDE', max_rpts=None, verbose=True):
         ude_kappa = (0.19, 0.26)
     else:
         raise ValueError(f'Unsupported temperature {Temperature}')
+    if ude_kappa_override is not None:
+        ude_kappa = tuple(float(v) for v in ude_kappa_override)
+        if len(ude_kappa) != 2:
+            raise ValueError('ude_kappa_override must contain two values')
 
     T_exp = Temperature + 273.15
 
@@ -433,12 +449,16 @@ def _parse_args():
     p.add_argument('--model', choices=['Physics', 'UDE'], default='UDE')
     p.add_argument('--max-rpts', type=int, default=None,
                    help='Truncate the experiment to this many RPTs')
+    p.add_argument('--ude-params', default=None,
+                   help='NPZ written by train_ude.py with fitted UDE parameters')
     p.add_argument('--output', default='results.png')
     return p.parse_args()
 
 
 if __name__ == '__main__':
     args = _parse_args()
+    ude_kappa = load_ude_parameters(args.ude_params) if args.ude_params else None
     res = run(SOC=args.soc, Temperature=args.temperature,
-              Model=args.model, max_rpts=args.max_rpts)
+              Model=args.model, max_rpts=args.max_rpts,
+              ude_kappa_override=ude_kappa)
     plot_results(res, output=args.output)
