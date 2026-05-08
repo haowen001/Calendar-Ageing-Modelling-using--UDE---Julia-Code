@@ -41,7 +41,7 @@ T_ref = Para.T_ref
 
 
 def load_ude_parameters(path):
-    """Load UDE kappas and optional NN vectors from a ``train_ude.py`` npz."""
+    """Load UDE kappas and optional NN vectors from a trainer ``npz``."""
     data = np.load(path)
     if 'NN_SEI_parameters' in data or 'NN_eps_parameters' in data:
         Para.set_NN_parameters(
@@ -450,7 +450,7 @@ def _parse_args():
     p.add_argument('--max-rpts', type=int, default=None,
                    help='Truncate the experiment to this many RPTs')
     p.add_argument('--ude-params', default=None,
-                   help='NPZ written by train_ude.py with fitted UDE parameters')
+                   help='NPZ written by train_ude_kappa.py or train_ude_nn.py')
     p.add_argument('--output', default='results.png')
     return p.parse_args()
 

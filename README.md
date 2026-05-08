@@ -88,13 +88,20 @@ python main.py --max-rpts 5                       # quick smoke test
 
 ### Training / fine-tuning the UDE parameters
 
-The Python port includes a finite-difference trainer for the UDE degradation
-parameters.  By default it uses the paper's unweighted L2 loss for relative
-capacity plus LAM and refits the two temperature-dependent UDE scale factors
-(`kappa1`, `kappa2`):
+The Python port includes three training entry points:
+
+* `train_ude_kappa.py` keeps the neural networks fixed and refits the two
+  temperature-dependent UDE scale factors (`kappa1`, `kappa2`).
+* `train_ude_nn.py` fine-tunes neural-network weights with a black-box SPSA
+  optimizer around the SciPy reproduction.
+* `train_ude_torch.py` uses PyTorch autograd and a differentiable degradation
+  ODE solver to train the neural-network weights directly.
+
+For a robust first calibration, run the kappa trainer.  By default it uses the
+paper's unweighted L2 loss for relative capacity plus LAM:
 
 ```bash
-python train_ude.py --soc 85 --temperature 45 --max-nfev 30 --plot results_trained.png
+python train_ude_kappa.py --soc 85 --temperature 45 --max-nfev 30 --plot results_trained.png
 python main.py --soc 85 --temperature 45 --ude-params trained_ude_T45_SOC85.npz
 ```
 
@@ -103,24 +110,53 @@ optimizer to give more importance to points with smaller experimental standard
 deviations:
 
 ```bash
-python train_ude.py --soc 85 --temperature 45 --loss std-weighted --optimizer least-squares
+python train_ude_kappa.py --soc 85 --temperature 45 --loss std-weighted --optimizer least-squares
 ```
 
 For a quicker trial while developing, fit only the first few RPT points:
 
 ```bash
-python train_ude.py --soc 85 --temperature 45 --max-rpts 4 --max-nfev 15
+python train_ude_kappa.py --soc 85 --temperature 45 --max-rpts 4 --max-nfev 15
 ```
 
 If the kappa-only fit is not flexible enough, the `last-layer` mode also
 fine-tunes the final dense layer of both UDE neural networks:
 
 ```bash
-python train_ude.py --soc 85 --temperature 45 --mode last-layer --max-nfev 80 --plot results_trained.png
+python train_ude_nn.py --soc 85 --temperature 45 --mode last-layer --freeze-kappa --init-params trained_ude_T45_SOC85.npz --max-nfev 80 --plot results_trained_nn.png
 ```
 
-Training is slower than a forward simulation because each optimizer evaluation
-runs the full calendar-ageing experiment through the stiff ODE solver.
+To fine-tune every neural-network parameter, use SPSA.  This is the closest
+black-box equivalent to training the UDE neural networks in the Python/SciPy
+port, but it is slower and noisier than the differentiable Julia/SciML training
+used in the paper:
+
+```bash
+python train_ude_nn.py --soc 85 --temperature 45 --mode nn --freeze-kappa --init-params trained_ude_T45_SOC85.npz --max-nfev 120 --plot results_trained_nn.png
+```
+
+For differentiable neural-network training, install the PyTorch dependencies
+and run:
+
+```bash
+python train_ude_torch.py --soc 85 --temperature 45 --init-params trained_ude_T45_SOC85.npz --epochs 300 --validate-main --plot results_trained_torch.png
+```
+
+The PyTorch-native `nn.Module` implementation is available as:
+
+```bash
+python train_ude_torch_module.py --soc 85 --temperature 45 --init-params trained_ude_T45_SOC85.npz --epochs 300 --validate-main --plot results_trained_torch_module.png
+```
+
+`train_ude_torch.py` trains a differentiable calendar-ageing degradation
+subsystem and exports parameters in the same `.npz` format consumed by
+`main.py`.  The optional `--validate-main` step evaluates the exported
+parameters in the full SciPy SPMe/RPT reproduction.
+
+The SciPy/SPSA trainer is slower than a forward simulation because each
+optimizer evaluation runs the full calendar-ageing experiment through the stiff
+ODE solver.  The PyTorch trainer is faster per update because gradients come
+from autograd through the differentiable degradation ODE.
 
 The Julia driver uses a singular mass-matrix DAE for the CV current-hold
 algebraic constraint. SciPy's `solve_ivp` does not support DAEs natively, so
