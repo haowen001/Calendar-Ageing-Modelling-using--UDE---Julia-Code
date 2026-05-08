@@ -250,7 +250,17 @@ def make_event(term_kind, threshold, current_func, t_step_start):
 # ---------------------------------------------------------------------------
 # Main driver
 # ---------------------------------------------------------------------------
-def run(SOC=85, Temperature=45, Model='UDE', max_rpts=None, verbose=True):
+def run(SOC=85, Temperature=45, Model='UDE', max_rpts=None, verbose=True,
+        kappa_override=None):
+    """Run the SPMe + SEI calendar-ageing simulation.
+
+    Parameters
+    ----------
+    kappa_override : tuple(float, float) or None
+        If provided, overrides the default (kappa1, kappa2) for the UDE model,
+        enabling training loops to inject candidate parameters without modifying
+        the module-level defaults.
+    """
     if Model not in ('Physics', 'UDE'):
         raise ValueError("Model must be 'Physics' or 'UDE'")
 
@@ -281,6 +291,9 @@ def run(SOC=85, Temperature=45, Model='UDE', max_rpts=None, verbose=True):
         ude_kappa = (0.19, 0.26)
     else:
         raise ValueError(f'Unsupported temperature {Temperature}')
+
+    if kappa_override is not None:
+        ude_kappa = tuple(kappa_override)
 
     T_exp = Temperature + 273.15
 
