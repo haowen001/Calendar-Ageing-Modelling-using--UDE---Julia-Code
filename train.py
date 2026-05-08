@@ -5,14 +5,35 @@ Loss function (Eq. 14 of the paper):
                      + λ2/n_RPTx_i * Σ_j ε_LAM_ij² ]
     λ1 = 0.75,  λ2 = 0.25
 
-Two training phases (matching the paper):
-  --phase kappa   Optimise κ1, κ2 only (2 params, minutes–hours)
-  --phase nn      Fine-tune all 304 NN weights + κ1/κ2 (slow, hours–days)
+Why solve_ivp cannot train the NN directly
+------------------------------------------
+scipy's solve_ivp is a black-box numerical integrator: it has no mechanism
+to propagate gradients back through the integration steps.  Three practical
+alternatives exist:
 
-Optimiser: Particle Swarm Optimisation (PSO) — matches paper settings
-  (n_particles=15, w=0.8, c1=c2=2.0, 100 iterations).
-  For kappa-only mode, scipy differential_evolution ('de') converges
-  faster and is the default.
+  1. Gradient-free (PSO / DE) — already in this file.  Works well for the
+     2-parameter κ problem, but PSO over 304 NN weights is impractical:
+     15 particles × 100 iterations × 3 SOCs = 4 500 forward passes.
+
+  2. SPSA (Simultaneous Perturbation Stochastic Approximation) — estimates
+     the gradient from only 2 forward passes regardless of dimension.
+     Adds Bernoulli noise to ALL parameters at once, so the gradient cost
+     is O(1) in the number of parameters.  This is the default for
+     --phase nn.
+
+  3. Differentiable ODE solver (torchdiffeq / diffrax) — rewrite the RHS
+     in PyTorch/JAX; the solver then propagates exact gradients via the
+     continuous adjoint method (what the paper uses with Julia's
+     SciMLSensitivity.jl).  Requires a full PyTorch port of the ODE.
+
+SPSA algorithm (Spall 1998):
+  θ_{k+1} = θ_k − a_k * ĝ_k
+  ĝ_k     = [L(θ_k + c_k·Δ) − L(θ_k − c_k·Δ)] / (2·c_k·Δ)   Δ ~ Bernoulli(±1)
+
+  a_k = a / (A + k + 1)^α       (decaying step size)
+  c_k = c / (k + 1)^γ           (decaying perturbation)
+
+  Recommended constants (Spall 1998): α=0.602, γ=0.101.
 
 Training conditions used in the paper:
   45 °C  →  SOC 30 %, 50 %, 80 %   (NN + κ training)
@@ -21,14 +42,11 @@ Training conditions used in the paper:
 
 Usage
 -----
-  # Optimise κ at 45 °C (recommended first step):
+  # Optimise κ at 45 °C (recommended first step, ~minutes–hours):
   python train.py --temperature 45 --phase kappa
 
-  # Optimise κ at 25 °C (keep NN fixed):
-  python train.py --temperature 25 --phase kappa
-
-  # Fine-tune NN weights at 45 °C (very slow — use --max-rpts to limit):
-  python train.py --temperature 45 --phase nn --max-rpts 4 --optimizer pso
+  # Fine-tune NN weights via SPSA (2 forward passes per step):
+  python train.py --temperature 45 --phase nn --max-rpts 4
 
   # Apply trained κ immediately (updates main.py hardcoded values):
   python train.py --temperature 45 --phase kappa --apply
@@ -295,66 +313,184 @@ def train_kappa(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — NN + kappa optimisation (slow)
+# SPSA — gradient estimator for high-dimensional black-box problems
+# ---------------------------------------------------------------------------
+def spsa(
+    loss_fn,
+    theta0: np.ndarray,
+    n_iter: int = 500,
+    a: float = 0.1,
+    c: float = 0.05,
+    A: float = 50.0,
+    alpha: float = 0.602,
+    gamma: float = 0.101,
+    clip: tuple[float, float] | None = None,
+    seed: int = 0,
+    checkpoint_every: int = 50,
+    checkpoint_fn=None,
+) -> tuple[np.ndarray, float]:
+    """Simultaneous Perturbation Stochastic Approximation (Spall 1998).
+
+    Estimates the gradient using only 2 forward passes per iteration,
+    regardless of the number of parameters.  Suitable for training 304 NN
+    weights through a black-box solve_ivp call.
+
+    The gradient estimate at iteration k:
+        Δ_k  ~ Bernoulli(±1)   (random sign vector, same shape as θ)
+        ĝ_k  = [L(θ + c_k·Δ) − L(θ − c_k·Δ)] / (2·c_k·Δ)
+        θ_{k+1} = clip(θ_k − a_k · ĝ_k)
+
+    Step-size schedules (Spall 1998 recommended exponents):
+        a_k = a / (A + k + 1)^α      α = 0.602
+        c_k = c / (k + 1)^γ          γ = 0.101
+
+    Parameters
+    ----------
+    a, c    : Initial step-size and perturbation magnitude.
+              Tune a so the first few steps change loss noticeably.
+              Tune c ≈ std(noise in loss) to keep signal-to-noise > 1.
+    A       : Stability constant — typically 10 % of n_iter.
+    clip    : (lo, hi) hard bounds on all parameters; None = unbounded.
+    checkpoint_fn : Called as checkpoint_fn(k, theta, loss) every
+                    checkpoint_every iterations (e.g. to save progress).
+    """
+    rng = np.random.default_rng(seed)
+    theta = theta0.copy()
+    best_theta = theta.copy()
+    best_loss = float("inf")
+
+    for k in range(n_iter):
+        ak = a / (A + k + 1) ** alpha
+        ck = c / (k + 1) ** gamma
+
+        # Bernoulli ±1 perturbation (all parameters perturbed simultaneously)
+        delta = rng.choice([-1.0, 1.0], size=len(theta))
+
+        theta_plus  = theta + ck * delta
+        theta_minus = theta - ck * delta
+        if clip is not None:
+            theta_plus  = np.clip(theta_plus,  clip[0], clip[1])
+            theta_minus = np.clip(theta_minus, clip[0], clip[1])
+
+        L_plus  = loss_fn(theta_plus)
+        L_minus = loss_fn(theta_minus)
+
+        # Central-difference gradient estimate
+        grad_est = (L_plus - L_minus) / (2.0 * ck * delta)
+
+        theta = theta - ak * grad_est
+        if clip is not None:
+            theta = np.clip(theta, clip[0], clip[1])
+
+        # Track best seen (SPSA is noisy; best ≠ last)
+        avg_loss = 0.5 * (L_plus + L_minus)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_theta = theta.copy()
+
+        print(
+            f"[SPSA iter {k + 1:4d}/{n_iter}]"
+            f"  a_k={ak:.2e}  c_k={ck:.2e}"
+            f"  L+={L_plus:.4f}  L-={L_minus:.4f}  avg={avg_loss:.4f}"
+            f"  best={best_loss:.4f}"
+        )
+
+        if checkpoint_fn is not None and (k + 1) % checkpoint_every == 0:
+            checkpoint_fn(k + 1, best_theta, best_loss)
+
+    return best_theta, best_loss
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — NN + kappa optimisation via SPSA
 # ---------------------------------------------------------------------------
 def train_nn_kappa(
     temperature: int,
     soc_list: list[int],
     max_rpts: int | None,
-    n_particles: int = 15,
-    n_iter: int = 100,
+    n_iter: int = 500,
+    spsa_a: float = 0.1,
+    spsa_c: float = 0.05,
+    output_path: str = PARAMS_FILE,
 ) -> tuple[np.ndarray, np.ndarray, float, float, float]:
-    """Fine-tune all 302 NN weights + κ1, κ2 (304 parameters total) via PSO.
+    """Fine-tune all 304 NN weights + κ1, κ2 via SPSA.
 
-    Starts from the pre-trained Julia NN weights as the initial guess region.
+    SPSA needs only 2 forward passes per gradient step — the same cost
+    regardless of whether there are 2 or 304 parameters.  This makes it
+    tractable where PSO (which needs n_particles × n_iter passes) is not.
+
+    The parameter vector is:
+        x = [NN_SEI_params (151), NN_eps_params (151), κ1, κ2]   dim=304
+
+    κ values are log-transformed internally so the search is unconstrained
+    while keeping κ > 0.
+
     Returns (sei_params, eps_params, kappa1, kappa2, best_loss).
-
-    NOTE: PSO over 304 dimensions is very slow.  Use --max-rpts 3-4 and
-    expect multiple hours.  The paper trains the NN using continuous adjoint
-    sensitivity (gradient-based); this script uses gradient-free PSO as a
-    practical alternative.
     """
     sei0 = Para.NN_SEI_parameters.copy()
     eps0 = Para.NN_eps_parameters.copy()
     n_sei = len(sei0)
     n_eps = len(eps0)
 
-    # Search bounds: ± 2× magnitude of pre-trained weights, min ± 0.5
-    def _weight_bounds(v):
-        half = np.maximum(np.abs(v) * 2.0, 0.5)
-        return list(zip((v - half).tolist(), (v + half).tolist()))
+    # Start κ from the temperature-default hardcoded values (log-space)
+    _kappa_defaults = {45: (1.0, 1.0), 25: (0.17, 0.46), 0: (0.19, 0.26)}
+    k1_0, k2_0 = _kappa_defaults[temperature]
+    log_k0 = np.log([k1_0, k2_0])
 
-    bounds = _weight_bounds(sei0) + _weight_bounds(eps0) + KAPPA_BOUNDS
+    # Full parameter vector: [sei_weights, eps_weights, log_κ1, log_κ2]
+    theta0 = np.concatenate([sei0, eps0, log_k0])
 
     print(
         f"\n{'=' * 60}\n"
-        f"  NN + kappa optimisation\n"
+        f"  NN + kappa optimisation (SPSA)\n"
         f"  Temperature = {temperature} °C\n"
         f"  SOC list    = {soc_list}\n"
         f"  max_rpts    = {max_rpts}\n"
-        f"  Parameters  = {len(bounds)}\n"
+        f"  Parameters  = {len(theta0)}  (NN: {n_sei + n_eps}, κ: 2)\n"
+        f"  n_iter      = {n_iter}  ({2 * n_iter} forward passes total)\n"
         f"{'=' * 60}\n"
     )
     _eval_count[0] = 0
 
-    def loss_fn(x):
+    def loss_fn(x: np.ndarray) -> float:
         sei = x[:n_sei]
         eps = x[n_sei : n_sei + n_eps]
-        k1, k2 = float(x[-2]), float(x[-1])
-        return evaluate(
-            (k1, k2), temperature, soc_list, max_rpts,
-            sei_vec=sei, eps_vec=eps,
-        )
+        k1  = float(np.exp(x[-2]))
+        k2  = float(np.exp(x[-1]))
+        return evaluate((k1, k2), temperature, soc_list, max_rpts,
+                        sei_vec=sei, eps_vec=eps)
+
+    def _checkpoint(step, theta, loss):
+        sei = theta[:n_sei]
+        eps = theta[n_sei : n_sei + n_eps]
+        k1  = float(np.exp(theta[-2]))
+        k2  = float(np.exp(theta[-1]))
+        set_nn_params(sei, eps)
+        save_params(output_path, {
+            "NN_SEI_parameters": sei.tolist(),
+            "NN_eps_parameters": eps.tolist(),
+            f"kappa_{temperature}C": [k1, k2],
+            f"loss_{temperature}C_nn": loss,
+        })
+        print(f"  [checkpoint @ step {step}]  κ=({k1:.4f}, {k2:.4f})  loss={loss:.4f}")
 
     t0 = time.time()
-    best, best_loss = pso(loss_fn, bounds, n_particles=n_particles, n_iter=n_iter)
+    best_theta, best_loss = spsa(
+        loss_fn, theta0,
+        n_iter=n_iter,
+        a=spsa_a,
+        c=spsa_c,
+        A=0.1 * n_iter,
+        clip=None,               # NN weights are unbounded; κ in log-space
+        checkpoint_fn=_checkpoint,
+    )
     elapsed = time.time() - t0
 
-    sei_best = best[:n_sei]
-    eps_best = best[n_sei : n_sei + n_eps]
-    k1, k2 = float(best[-2]), float(best[-1])
+    sei_best = best_theta[:n_sei]
+    eps_best = best_theta[n_sei : n_sei + n_eps]
+    k1 = float(np.exp(best_theta[-2]))
+    k2 = float(np.exp(best_theta[-1]))
 
-    # Restore best NN weights into module for immediate use
     set_nn_params(sei_best, eps_best)
 
     print(
@@ -434,12 +570,19 @@ def _parse() -> argparse.Namespace:
                    help="Truncate each simulation to this many RPT cycles "
                         "(faster but fits only early degradation)")
     p.add_argument("--optimizer", choices=["de", "pso"], default="de",
-                   help="de=differential_evolution (default, faster for 2 params); "
+                   help="kappa phase: de=differential_evolution (default); "
                         "pso=particle swarm (matches paper)")
     p.add_argument("--n-particles", type=int, default=15,
                    help="PSO population / DE popsize factor (default: 15)")
     p.add_argument("--n-iter", type=int, default=100,
-                   help="Maximum iterations (default: 100)")
+                   help="Iterations for kappa phase (default: 100); "
+                        "for nn phase this is SPSA steps (default 500 if unset)")
+    p.add_argument("--spsa-a", type=float, default=0.1,
+                   help="SPSA initial step size a (nn phase, default: 0.1). "
+                        "Increase if early loss barely moves; decrease if it diverges.")
+    p.add_argument("--spsa-c", type=float, default=0.05,
+                   help="SPSA perturbation magnitude c (nn phase, default: 0.05). "
+                        "Should be ≈ std(noise in loss).")
     p.add_argument("--output", default=PARAMS_FILE,
                    help="JSON file for saving trained parameters")
     p.add_argument("--load-nn", action="store_true",
@@ -494,12 +637,15 @@ def main() -> None:
 
     # -----------------------------------------------------------------------
     else:  # nn
+        nn_iters = args.n_iter if args.n_iter != 100 else 500  # default 500 for SPSA
         sei, eps, k1, k2, loss = train_nn_kappa(
             temperature=args.temperature,
             soc_list=soc_list,
             max_rpts=args.max_rpts,
-            n_particles=args.n_particles,
-            n_iter=args.n_iter,
+            n_iter=nn_iters,
+            spsa_a=args.spsa_a,
+            spsa_c=args.spsa_c,
+            output_path=args.output,
         )
         save_params(
             args.output,
